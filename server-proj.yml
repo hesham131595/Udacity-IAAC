@@ -1,0 +1,212 @@
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+    AMI: 
+        Description: An image Id for all nodes
+        Type: String 
+    InsType:
+        Description: An Instance Type for all nodes
+        Type: String
+    Key:
+        Description: Key for all nodes
+        Type: String
+    JumpType:
+        Description: An Instance Type for jump
+        Type: String
+Resources:
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+  WebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our hosts and SSH from local only
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+  JumpServSecG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: Allow SSH to Jump Server
+        VpcId:  
+            Fn::ImportValue:
+                !Sub "${EnvironmentName}-VPCID"
+        SecurityGroupIngress:
+            - IpProtocol: tcp
+              FromPort: 22
+              ToPort: 22
+              CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:
+            - IpProtocol: "-1"
+              FromPort: "-1"
+              ToPort: "-1"
+              CidrIp: 0.0.0.0/0    
+  JumpServer:
+    Type: AWS::EC2::Instance
+    Properties:
+        ImageId: !Ref AMI
+        InstanceType: !Ref JumpType
+       # KeyName:  !Ref Key
+        AvailabilityZone: !Select [ 0,  !GetAZs '']
+        NetworkInterfaces:
+            - AssociatePublicIpAddress: true
+              DeviceIndex:  '0'
+              GroupSet:
+                - Ref: JumpServSecG
+              SubnetId: 
+                  Fn::ImportValue:
+                    !Sub "${EnvironmentName}-PUB1-SN"
+  
+  UdacityRoleS3:
+      Type: AWS::IAM::Role
+      Properties:
+          AssumeRolePolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                  - Effect: Allow
+                    Principal:
+                        Service:
+                            - ec2.amazonaws.com
+                    Action:
+                        - "sts:AssumeRole"
+  
+  UdacityPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+          PolicyName: "AmazonS3ReadOnlyAccess"
+          PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                  - Effect: Allow
+                    Action: "*"
+                    Resource: "*"
+          Roles: 
+              - !Ref UdacityRoleS3
+
+  UdacityEc2Profile:
+      Type: AWS::IAM::InstanceProfile
+      Properties: 
+          Roles:
+              - !Ref UdacityRoleS3
+  WebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update -y
+          sudo apt-get install apache2 -y
+          sudo systemctl start apache2.service  
+          cd /var/www/html
+          echo "it works! Udagram, Udacity" > index.html        
+      # ToDo: AMI ID of Ubuntu Linux machine. Too get one, try creating a VM from the web console. 
+      ImageId: !Ref AMI
+      # ToDo: Change the key-pair name, as applicable to you. 
+     # KeyName: !Ref Key
+      SecurityGroups:
+      - Ref: WebServerSecGroup
+      InstanceType: !Ref InsType
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+      IamInstanceProfile: !Ref UdacityEc2Profile
+  WebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: 
+          !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchConfigurationName:
+        Ref: WebAppLaunchConfig
+      MinSize: '4'
+      MaxSize: '5'
+      TargetGroupARNs:
+      - Ref: WebAppTargetGroup
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+      - Ref: LBSecGroup
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebAppTargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLB
+      Port: '80'
+      Protocol: HTTP
+  ALBListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'WebAppTargetGroup'
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+  WebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+Outputs:
+
+    JumpSerIp:
+        Description: Ip of the JumpServer
+        Value: !GetAtt JumpServer.PublicIp
+        Export:
+            Name: !Sub "${EnvironmentName}-JumpServerIp"
+    
+    LoadBalancerDNSName:
+        Description: DNS name of the load balancer
+        Value: !Join [ "", ["http://", !GetAtt WebAppLB.DNSName]]
+        Export:
+            Name: !Sub  "${EnvironmentName}-LBEndpoint"

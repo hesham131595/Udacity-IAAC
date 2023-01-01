@@ -1,0 +1,18 @@
+[
+    {
+        "ParameterKey": "EnvironmentName",
+        "ParameterValue": "UdacityProject"
+    },
+    {
+        "ParameterKey": "InsType",
+        "ParameterValue": "t3.medium"
+    },
+    {
+        "ParameterKey": "JumpType",
+        "ParameterValue": "t2.micro"
+    },
+    {
+        "ParameterKey":"AMI",
+        "ParameterValue":"ami-061dbd1209944525c"
+    }
+]
